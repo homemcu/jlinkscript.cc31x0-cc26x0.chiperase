@@ -1,0 +1,2 @@
+[CPU] 
+ScriptFile="CC13x0-CC26x0-Chip-Erase.JLinkScript"

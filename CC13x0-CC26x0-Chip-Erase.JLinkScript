@@ -1,0 +1,163 @@
+/*
+Copyright (c) 2018 Vladimir Alemasov
+
+Purpose : J-Link script file to perform full chip erase of the TI CC13x0/CC26x0 devices
+Hardware: V8.00
+Firmware: Nov 28 2014 13:44:46
+Software: SEGGER J-Link Commander V5.12c
+Literature:
+  [1]  UM08001 (J-Link User Guide)
+  [2]  SWCU117H (CC13x0, CC26x0 SimpleLink Wireless MCU Technical Reference Manual)
+  [3]  IEEE Std 1149.1-2001
+  [4]  TI Forum: https://e2e.ti.com/support/wireless_connectivity/proprietary_sub_1_ghz_simpliciti/f/156/p/521263/1923083
+*/
+
+void _ChipErase(void)
+{
+  int BitPos;
+  int IdCode;
+  int ICEPickCode;
+  int Res;
+  int Data;
+
+  JTAG_Speed  = 100;
+
+// JTAG chain: TDI -> ICEPick (IR6) -> TDO
+// ICEPick selected
+  JTAG_DRPre  = 0;
+  JTAG_DRPost = 0;
+  JTAG_IRPre  = 0;
+  JTAG_IRPost = 0;
+  JTAG_IRLen  = 6;
+
+  JTAG_Write(0x1F, 0, 6);					// TAP Reset
+  SYS_Sleep(3);
+
+// 5.2.2 Programming Sequences
+// 5.2.2.1 Opening Command Window
+// Before the cJTAG module accepts any commands, the control level must be set to 2 and locked.
+// 1. Scan IR (bypass, end in Pause DR): Load benign opcode into the instruction register.
+  JTAG_StoreIR(0x3F);						// Bypass
+  JTAG_Store(0, 0, 1);						// Idle
+// 2. Goto Scan (through Update DR, end in Pause DR): This is the first ZBS.
+  JTAG_Store(0x35, 0, 7);
+// 3. Goto Scan (through Update DR, end in Pause DR): This is the second ZBS.
+  JTAG_Store(0x35, 0, 7);
+// 4. Scan DR (1 bit, end in Pause DR): This locks the control level at 2.
+// Opening the command window decouples the device TAP; the decoupling occurs when the second ZBS occurs.
+  JTAG_Store(0xD5, 0, 9);
+
+// 5.2.2.2 Changing to 4-Pin Mode
+// When the command window is open, commands can be issued. To change to 4-pin mode, APFC must be
+// written to 1 (using STC2 command), which assumes the TAP state is starting from Pause DR.
+// 1. Scan DR (2 bits of 1, end in Pause DR): Load CP0 with 2.
+  JTAG_Store(0x195, 0, 10);
+// 2. Goto Scan (Through Update DR to Pause DR): Complete CP0 by going through update.
+  JTAG_Store(0xC015, 0, 17);
+// 3. Scan DR (9 bits of 1, end in Pause DR): Load CP1 with 9.
+// 4. Goto Scan (Through Update DR to Pause DR): Complete CP1 by going through update.
+  JTAG_Store(0x60000F5, 0x1FFFE00, 28);
+  JTAG_WriteClocks(0);
+
+// 5.3 ICEPick
+// ICEPick is the primary TAP in the chip.
+// Table 5-7. Instruction Register Opcodes
+  SYS_Sleep(4);
+// 5.3.2.3 Instruction Register
+  JTAG_StoreIR(0x04);						// IDCODE
+// 5.3.2.5 Device Identification Register
+  BitPos = JTAG_StoreDR(0x00000000, 32);
+  IdCode = JTAG_GetU32(BitPos);
+  Report1("IDCODE: ", IdCode);
+
+// 5.3.2.3 Instruction Register
+  JTAG_StoreIR(0x05);						// ICEPICKCODE
+// 5.3.2.7 ICEPick Identification Register
+  BitPos = JTAG_StoreDR(0x00000000, 32);
+  ICEPickCode = JTAG_GetU32(BitPos);
+  Report1("ICEPICKCODE: ", ICEPickCode);
+
+// 5.3.2.3 Instruction Register
+  JTAG_StoreIR(0x07);						// CONNECT
+// 5.3.2.8 Connect Register
+  JTAG_StoreDR(0x89, 8);					// connect key
+
+// 5.3.2.3 Instruction Register
+  JTAG_StoreIR(0x02);						// ROUTER
+// 5.3.3 ROUTER Scan Chain
+// Table 5-12. ROUTER DR Scan Chain Description
+//                      Table 5-19. STTR – Secondary Test TAP Register
+// x x x x x x x x      x x x x x x x x x x x x x x x x x x x x x x x x
+// Write access
+// 1 x x x x x x x      x x x x x x x x x x x x x x x x x x x x x x x x
+// Test TAP (see Table 5-5. Slave TAP Order)
+// x 0 0 1 x x x x      x x x x x x x x x x x x x x x x x x x x x x x x
+// AON WUC (Test TAP 5 register)
+// x x x x 0 1 0 1      x x x x x x x x x x x x x x x x x x x x x x x x
+// Some of the registers in AON WUC TAP are open for end user.
+// This includes registers for requesting chip erase, system reset, and MCU reset.
+// SelectTAP = 1, the TAP is selected for inclusion in the master scan path
+// when the TAP state advances to the Run-Test-Idle state.
+// x x x x x x x x      0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0
+  Data = 0x95000100;
+  JTAG_StoreDR(Data, 32);
+  JTAG_StoreIR(0x3F);						// Bypass
+  JTAG_WriteClocks(10);
+
+// JTAG chain: TDI -> ICEPick (IR6) -> AON WUC TAP (IR4) -> TDO
+// ICEPick selected
+  JTAG_DRPre  = 1;
+  JTAG_DRPost = 0;
+  JTAG_IRPre  = 4;
+  JTAG_IRPost = 0;
+  JTAG_IRLen  = 6;
+
+// Read STTR register to verify it’s 0x303 indicating AON_WUC TAP has been added successfully. 
+  JTAG_StoreIR(0x02);						// ROUTER
+  Data = 0x15000000;
+  BitPos = JTAG_StoreDR(Data, 32);			// DR write: 0x2A000000, NumBits: 32 + 1 = 33
+  Res = JTAG_GetU32(BitPos);				// DR read: 0x2A000606
+  Report1("STTR: ", Res);					// Res: 0x15000303
+
+// JTAG chain: TDI -> ICEPick (IR6) -> AON WUC TAP (IR4) -> TDO
+// AON WUC TAP selected
+  JTAG_DRPre  = 0;
+  JTAG_DRPost = 1;
+  JTAG_IRPre  = 0;
+  JTAG_IRPost = 6;
+  JTAG_IRLen  = 4;
+
+// 5.8 Debug Features Supported Through WUC TAP
+// IR 0x01, DR[7:0]
+  JTAG_StoreIR(0x01);
+// CHIP_ERASE_REQ, Bit 1
+// Setting this bit (if it is followed by MCU VD Reset request through
+// WUC TAP) initiates chip erase.
+// MCU_VD_RESET_REQ, Bit 5
+// Setting this bit requests reset of the entire MCU VD.
+  Data = 0x22;
+  JTAG_StoreDR(Data, 8);
+// The chip erase is done after this DR scan is performed.
+  JTAG_WriteClocks(0);
+
+  SYS_Sleep(50);
+  Report("Chip erase is done.");
+}
+
+void ResetTarget(void)
+{
+}
+
+void InitEMU(void)
+{
+}
+
+void InitTarget(void)
+{
+  JTAG_ResetPin = 0;
+  SYS_Sleep(50);
+  JTAG_ResetPin = 1;
+  SYS_Sleep(50);
+
+  _ChipErase();
+}
